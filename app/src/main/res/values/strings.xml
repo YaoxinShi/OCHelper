@@ -1,0 +1,8 @@
+<resources>
+    <string name="app_name">OCHelper</string>
+    <string name="notification_channel_services">OCHelper Services</string>
+    <string name="notification_ocnode_running">OC Node running</string>
+    <string name="notification_mcp_running">MCP Server running</string>
+    <string name="notification_rtsp_running">RTSP Stream running</string>
+    <string name="notification_gateway_running">Gateway connected</string>
+</resources>
