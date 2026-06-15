@@ -8,11 +8,18 @@ Step 1:
 请分析一下apk软件架构和UI应该如何设计。
 
 Step 2:
-开始代码实现和验证
+开始代码实现和验证。
+程序需要支持X86和ARM两种CPU架构。
 注：
 本地的Android SDK在 ~/Android/Sdk
 远程Android测试设备在 adb connect 10.239.152.121
 
 Step 3:
 把如何编译apk，如何安装apk，如何使用apk的内容写入readme.md
+
+Step 4:
+1. MCP server的默认端口从8765改为11800
+2. 推流的默认端口从8554改为11801
+3. node页面里面，openclaw的gateway url默认为：ws://10.239.152.92:18789  auth token默认为 b301****b1c0
+4. gateway页面里面，openclaw的gateway url默认为：http://10.239.152.92:18789  auth token默认为 b301****b1c0
 

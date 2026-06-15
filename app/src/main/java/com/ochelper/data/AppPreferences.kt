@@ -17,8 +17,8 @@ private val Context.dataStore: DataStore<Preferences> by preferencesDataStore(na
 class AppPreferences(private val context: Context) {
 
     // ── OCNode ────────────────────────────────────────────────
-    val ocNodeUrl: Flow<String> = context.dataStore.data.map { it[Keys.OC_NODE_URL] ?: "" }
-    val ocNodeToken: Flow<String> = context.dataStore.data.map { it[Keys.OC_NODE_TOKEN] ?: "" }
+    val ocNodeUrl: Flow<String> = context.dataStore.data.map { it[Keys.OC_NODE_URL] ?: "ws://10.239.152.92:18789" }
+    val ocNodeToken: Flow<String> = context.dataStore.data.map { it[Keys.OC_NODE_TOKEN] ?: "b301dd84930f8f36d302de47ed009017a93647b8b12cb1c0" }
     val ocNodeEnabled: Flow<Boolean> = context.dataStore.data.map { it[Keys.OC_NODE_ENABLED] ?: false }
     val ocNodeId: Flow<String> = context.dataStore.data.map {
         it[Keys.OC_NODE_ID] ?: UUID.randomUUID().toString().also { id ->
@@ -32,7 +32,7 @@ class AppPreferences(private val context: Context) {
     suspend fun setOcNodeId(id: String) = context.dataStore.edit { it[Keys.OC_NODE_ID] = id }
 
     // ── MCP Server ────────────────────────────────────────────
-    val mcpPort: Flow<Int> = context.dataStore.data.map { it[Keys.MCP_PORT] ?: 8765 }
+    val mcpPort: Flow<Int> = context.dataStore.data.map { it[Keys.MCP_PORT] ?: 11800 }
     val mcpToken: Flow<String> = context.dataStore.data.map { it[Keys.MCP_TOKEN] ?: generateToken() }
     val mcpEnabled: Flow<Boolean> = context.dataStore.data.map { it[Keys.MCP_ENABLED] ?: false }
 
@@ -41,7 +41,7 @@ class AppPreferences(private val context: Context) {
     suspend fun setMcpEnabled(enabled: Boolean) = context.dataStore.edit { it[Keys.MCP_ENABLED] = enabled }
 
     // ── RTSP ──────────────────────────────────────────────────
-    val rtspPort: Flow<Int> = context.dataStore.data.map { it[Keys.RTSP_PORT] ?: 8554 }
+    val rtspPort: Flow<Int> = context.dataStore.data.map { it[Keys.RTSP_PORT] ?: 11801 }
     val rtspEnabled: Flow<Boolean> = context.dataStore.data.map { it[Keys.RTSP_ENABLED] ?: false }
     val rtspResolution: Flow<String> = context.dataStore.data.map { it[Keys.RTSP_RESOLUTION] ?: "1280x720" }
     val rtspFps: Flow<Int> = context.dataStore.data.map { it[Keys.RTSP_FPS] ?: 30 }
@@ -56,10 +56,10 @@ class AppPreferences(private val context: Context) {
     suspend fun setRtspCameraFacing(facing: String) = context.dataStore.edit { it[Keys.RTSP_CAMERA_FACING] = facing }
 
     // ── Gateway ───────────────────────────────────────────────
-    val gatewayUrl: Flow<String> = context.dataStore.data.map { it[Keys.GATEWAY_URL] ?: "" }
-    val gatewayApiKey: Flow<String> = context.dataStore.data.map { it[Keys.GATEWAY_API_KEY] ?: "" }
+    val gatewayUrl: Flow<String> = context.dataStore.data.map { it[Keys.GATEWAY_URL] ?: "http://10.239.152.92:18789" }
+    val gatewayApiKey: Flow<String> = context.dataStore.data.map { it[Keys.GATEWAY_API_KEY] ?: "b301dd84930f8f36d302de47ed009017a93647b8b12cb1c0" }
     val gatewayEnabled: Flow<Boolean> = context.dataStore.data.map { it[Keys.GATEWAY_ENABLED] ?: false }
-    val gatewayDefaultModel: Flow<String> = context.dataStore.data.map { it[Keys.GATEWAY_DEFAULT_MODEL] ?: "" }
+    val gatewayDefaultModel: Flow<String> = context.dataStore.data.map { it[Keys.GATEWAY_DEFAULT_MODEL] ?: "openclaw/custom-127-0-0-1-8080" }
 
     suspend fun setGatewayUrl(url: String) = context.dataStore.edit { it[Keys.GATEWAY_URL] = url }
     suspend fun setGatewayApiKey(key: String) = context.dataStore.edit { it[Keys.GATEWAY_API_KEY] = key }

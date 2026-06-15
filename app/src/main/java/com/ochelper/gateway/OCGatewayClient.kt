@@ -15,9 +15,12 @@ import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.buildJsonArray
 import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.put
@@ -25,7 +28,7 @@ import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
-import okhttp3.Response
+import java.util.UUID
 import java.util.concurrent.TimeUnit
 
 data class OCGatewayConfig(
@@ -110,11 +113,15 @@ class OCGatewayClient {
         while (currentCoroutineContext().isActive) {
             _connectionState.value = GatewayConnectionState.Connecting
             try {
-                // First do a status probe
                 val statusOk = fetchStatus(cfg)
                 if (statusOk) {
                     _connectionState.value = GatewayConnectionState.Connected(cfg.gatewayUrl)
-                    subscribeToEvents(cfg)
+                    // Keep alive loop — OpenClaw has no dedicated SSE events endpoint
+                    while (currentCoroutineContext().isActive) {
+                        delay(30_000L)
+                        // Re-check health
+                        if (!fetchStatus(cfg)) break
+                    }
                     backoffSec = 1L
                 }
             } catch (e: Exception) {
@@ -129,21 +136,34 @@ class OCGatewayClient {
     private fun fetchStatus(cfg: OCGatewayConfig): Boolean {
         return try {
             val req = Request.Builder()
-                .url("${cfg.gatewayUrl}/api/v1/status")
-                .header("Authorization", "Bearer ${cfg.apiKey}")
+                .url("${cfg.gatewayUrl}/health")
                 .get()
                 .build()
             httpClient.newCall(req).execute().use { resp ->
                 if (!resp.isSuccessful) return false
-                val body = resp.body?.string() ?: return false
-                val obj = json.parseToJsonElement(body).jsonObject
-                val modelId = obj["model"]?.jsonObject?.get("id")?.jsonPrimitive?.content
-                    ?: obj["current_model"]?.jsonPrimitive?.content
-                if (modelId != null) {
-                    _currentModel.value = ModelInfo(
-                        id = modelId,
-                        provider = obj["model"]?.jsonObject?.get("provider")?.jsonPrimitive?.content ?: "unknown"
-                    )
+                // Also refresh model list
+                try {
+                    val modelsReq = Request.Builder()
+                        .url("${cfg.gatewayUrl}/v1/models")
+                        .header("Authorization", "Bearer ${cfg.apiKey}")
+                        .get()
+                        .build()
+                    httpClient.newCall(modelsReq).execute().use { mr ->
+                        if (mr.isSuccessful) {
+                            val body = mr.body?.string() ?: return@use
+                            val obj = json.parseToJsonElement(body).jsonObject
+                            val firstModel = obj["data"]?.jsonArray?.firstOrNull()?.jsonObject
+                            val modelId = firstModel?.get("id")?.jsonPrimitive?.content
+                            if (modelId != null) {
+                                _currentModel.value = ModelInfo(
+                                    id = modelId,
+                                    provider = firstModel?.get("owned_by")?.jsonPrimitive?.content ?: "openclaw"
+                                )
+                            }
+                        }
+                    }
+                } catch (e: Exception) {
+                    Log.d(TAG, "fetchModels error: ${e.message}")
                 }
                 true
             }
@@ -153,85 +173,7 @@ class OCGatewayClient {
         }
     }
 
-    private suspend fun subscribeToEvents(cfg: OCGatewayConfig) {
-        val request = Request.Builder()
-            .url("${cfg.gatewayUrl}/api/v1/events")
-            .header("Authorization", "Bearer ${cfg.apiKey}")
-            .header("Accept", "text/event-stream")
-            .get()
-            .build()
-
-        sseJob?.cancel()
-        // Read SSE stream line-by-line
-        var currentEventType: String? = null
-        try {
-            httpClient.newCall(request).execute().use { resp ->
-                if (!resp.isSuccessful) {
-                    _connectionState.value = GatewayConnectionState.Error("HTTP ${resp.code}")
-                    return
-                }
-                val source = resp.body?.source() ?: return
-                while (currentCoroutineContext().isActive) {
-                    val line = source.readUtf8Line() ?: break
-                    when {
-                        line.startsWith("event:") -> currentEventType = line.removePrefix("event:").trim()
-                        line.startsWith("data:") -> {
-                            val data = line.removePrefix("data:").trim()
-                            if (data.isNotEmpty() && data != "[DONE]") handleSseEvent(currentEventType, data)
-                            if (line.isEmpty()) currentEventType = null
-                        }
-                        line.isEmpty() -> currentEventType = null
-                    }
-                }
-            }
-        } catch (e: Exception) {
-            Log.w(TAG, "SSE stream error: ${e.message}")
-            _connectionState.value = GatewayConnectionState.Error(e.message ?: "SSE disconnected")
-        }
-    }
-
-    private fun handleSseEvent(type: String?, data: String) {
-        try {
-            val obj = json.parseToJsonElement(data).jsonObject
-            val event = when (type) {
-                "model_changed" -> {
-                    val modelId = obj["id"]?.jsonPrimitive?.content ?: return
-                    val model = ModelInfo(
-                        id = modelId,
-                        provider = obj["provider"]?.jsonPrimitive?.content ?: "unknown"
-                    )
-                    _currentModel.value = model
-                    GatewayEvent.ModelChanged(model)
-                }
-                "tool_call_start" -> GatewayEvent.ToolCallStart(
-                    id = obj["id"]?.jsonPrimitive?.content ?: "",
-                    toolName = obj["tool"]?.jsonPrimitive?.content ?: obj["name"]?.jsonPrimitive?.content ?: "",
-                    inputJson = obj["input"]?.toString() ?: "{}"
-                )
-                "tool_call_end" -> GatewayEvent.ToolCallEnd(
-                    id = obj["id"]?.jsonPrimitive?.content ?: "",
-                    toolName = obj["tool"]?.jsonPrimitive?.content ?: obj["name"]?.jsonPrimitive?.content ?: "",
-                    outputJson = obj["output"]?.toString() ?: "{}",
-                    durationMs = obj["duration_ms"]?.jsonPrimitive?.content?.toLongOrNull() ?: 0L,
-                    ok = obj["ok"]?.jsonPrimitive?.content?.toBooleanStrictOrNull() ?: true
-                )
-                "text_delta" -> GatewayEvent.TextDelta(
-                    sessionId = obj["session_id"]?.jsonPrimitive?.content ?: "",
-                    delta = obj["delta"]?.jsonPrimitive?.content ?: ""
-                )
-                "task_complete" -> GatewayEvent.TaskComplete(
-                    sessionId = obj["session_id"]?.jsonPrimitive?.content ?: "",
-                    totalTokens = obj["total_tokens"]?.jsonPrimitive?.content?.toIntOrNull() ?: 0
-                )
-                else -> return
-            }
-            scope.launch { _events.emit(event) }
-        } catch (e: Exception) {
-            Log.w(TAG, "Failed to parse SSE event: $data")
-        }
-    }
-
-    /** Send a task message to OpenClaw and stream the response via events. */
+    /** Send a task message to OpenClaw using OpenAI-compatible /v1/chat/completions. */
     suspend fun sendTask(
         message: String,
         sessionId: String? = null,
@@ -240,50 +182,87 @@ class OCGatewayClient {
     ): Result<String> {
         val cfg = config ?: return Result.failure(Exception("not connected"))
 
+        val effectiveModel = model?.takeIf { it.isNotEmpty() }
+            ?: cfg.defaultModel.takeIf { it.isNotEmpty() }
+            ?: "openclaw"
+
         val body = buildJsonObject {
-            put("message", message)
-            if (sessionId != null) put("session_id", sessionId)
-            val effectiveModel = model ?: cfg.defaultModel
-            if (effectiveModel.isNotEmpty()) put("model", effectiveModel)
+            put("model", effectiveModel)
+            put("messages", buildJsonArray {
+                add(buildJsonObject {
+                    put("role", "user")
+                    put("content", message)
+                })
+            })
+            put("stream", true)
         }.toString().toRequestBody("application/json".toMediaType())
 
-        val request = Request.Builder()
-            .url("${cfg.gatewayUrl}/api/v1/chat")
+        val reqBuilder = Request.Builder()
+            .url("${cfg.gatewayUrl}/v1/chat/completions")
             .header("Authorization", "Bearer ${cfg.apiKey}")
             .header("Accept", "text/event-stream")
             .post(body)
-            .build()
+        if (!sessionId.isNullOrEmpty()) reqBuilder.header("X-Session-Id", sessionId)
+        val request = reqBuilder.build()
 
-        return try {
-            val result = StringBuilder()
-            var newSessionId = sessionId ?: ""
+        return withContext(Dispatchers.IO) {
+            try {
+                val result = StringBuilder()
+                var newSessionId = sessionId ?: UUID.randomUUID().toString()
 
-            httpClient.newCall(request).execute().use { resp ->
-                if (!resp.isSuccessful) {
-                    return Result.failure(Exception("HTTP ${resp.code}: ${resp.message}"))
-                }
-                val source = resp.body?.source() ?: return Result.failure(Exception("empty response"))
-                while (!source.exhausted()) {
-                    val line = source.readUtf8Line() ?: break
-                    if (line.startsWith("data: ")) {
-                        val data = line.removePrefix("data: ").trim()
+                httpClient.newCall(request).execute().use { resp ->
+                    val rawBody = resp.body
+                        ?: return@withContext Result.failure(Exception("empty response"))
+
+                    if (!resp.isSuccessful) {
+                        val errBody = rawBody.string()
+                        val errMsg = extractErrorMessage(errBody) ?: "HTTP ${resp.code}"
+                        return@withContext Result.failure(Exception(errMsg))
+                    }
+
+                    val source = rawBody.source()
+                    while (!source.exhausted()) {
+                        val line = source.readUtf8Line() ?: break
+                        if (!line.startsWith("data:")) continue
+                        val data = line.removePrefix("data:").trim()
                         if (data == "[DONE]") break
                         try {
                             val obj = json.parseToJsonElement(data).jsonObject
-                            val delta = obj["delta"]?.jsonPrimitive?.content
-                                ?: obj["content"]?.jsonPrimitive?.content
+
+                            // Inline error in SSE chunk
+                            val errObj = obj["error"]?.jsonObject
+                            if (errObj != null) {
+                                val errMsg = errObj["message"]?.jsonPrimitive?.content ?: "unknown error"
+                                return@withContext Result.failure(Exception(errMsg))
+                            }
+
+                            // OpenAI format: choices[0].delta.content
+                            val delta = obj["choices"]?.jsonArray
+                                ?.firstOrNull()?.jsonObject
+                                ?.get("delta")?.jsonObject
+                                ?.get("content")?.jsonPrimitive?.content
+
                             if (delta != null) {
                                 result.append(delta)
                                 onChunk(delta)
                             }
-                            obj["session_id"]?.jsonPrimitive?.content?.let { newSessionId = it }
-                        } catch (_: Exception) {}
+
+                            obj["id"]?.jsonPrimitive?.content?.let { newSessionId = it }
+                        } catch (e: Exception) {
+                            Log.w(TAG, "SSE chunk parse error: $data — ${e.message}")
+                        }
                     }
                 }
+                Result.success(newSessionId)
+            } catch (e: Exception) {
+                Log.e(TAG, "sendTask failed", e)
+                Result.failure(Exception(e.message ?: e.javaClass.simpleName, e))
             }
-            Result.success(newSessionId.ifEmpty { result.toString() })
-        } catch (e: Exception) {
-            Result.failure(e)
         }
     }
+
+    private fun extractErrorMessage(body: String): String? = try {
+        json.parseToJsonElement(body).jsonObject["error"]
+            ?.jsonObject?.get("message")?.jsonPrimitive?.content
+    } catch (_: Exception) { null }
 }

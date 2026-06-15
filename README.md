@@ -147,7 +147,7 @@ adb -s 10.239.152.121:5555 install -r app/build/outputs/apk/debug/app-debug.apk
 
 **配置步骤（MCP 页）：**
 
-1. 设置监听端口（默认 `8765`）
+1. 设置监听端口（默认 `11800`）
 2. 记录自动生成的 **Bearer Token**
 3. 点击 **Start Server** 启动
 
@@ -157,7 +157,7 @@ adb -s 10.239.152.121:5555 install -r app/build/outputs/apk/debug/app-debug.apk
 {
   "mcpServers": {
     "android-device": {
-      "url": "http://<设备IP>:8765/mcp",
+      "url": "http://<设备IP>:11800/mcp",
       "headers": {
         "Authorization": "Bearer <Token>"
       }
@@ -183,19 +183,19 @@ adb -s 10.239.152.121:5555 install -r app/build/outputs/apk/debug/app-debug.apk
 **播放地址：**
 
 ```
-rtsp://<设备IP>:8554/stream
+rtsp://<设备IP>:11801/stream
 ```
 
 **使用 VLC 播放：**
 
 ```bash
-vlc rtsp://<设备IP>:8554/stream
+vlc rtsp://<设备IP>:11801/stream
 ```
 
 **使用 ffplay：**
 
 ```bash
-ffplay rtsp://<设备IP>:8554/stream
+ffplay rtsp://<设备IP>:11801/stream
 ```
 
 ---
