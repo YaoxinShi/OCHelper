@@ -29,13 +29,21 @@ class CameraCapability(private val context: Context) : DeviceCapability {
     }
 
     override suspend fun execute(params: JsonObject): JsonObject {
-        val facing = params["camera"]?.jsonPrimitive?.content ?: "back"
+        // Gateway camera.snap sends "facing"; tolerate the legacy "camera" key too.
+        val facing = params["facing"]?.jsonPrimitive?.content
+            ?: params["camera"]?.jsonPrimitive?.content
+            ?: "back"
         val quality = params["quality"]?.jsonPrimitive?.content?.toIntOrNull() ?: 85
 
         return try {
             val base64Image = capturePhoto(facing, quality)
             buildJsonObject {
-                put("image_base64", base64Image)
+                // Canonical fields expected by the gateway's camera.snap result parser.
+                put("format", "jpg")
+                put("base64", base64Image)
+                put("width", CAPTURE_WIDTH)
+                put("height", CAPTURE_HEIGHT)
+                // Extra context (ignored by the gateway, useful for debugging).
                 put("mime_type", "image/jpeg")
                 put("camera", facing)
             }
@@ -59,7 +67,7 @@ class CameraCapability(private val context: Context) : DeviceCapability {
                 } ?: cameraManager.cameraIdList.firstOrNull()
                 ?: throw IllegalStateException("No camera available")
 
-                val imageReader = ImageReader.newInstance(1280, 720, ImageFormat.JPEG, 1)
+                val imageReader = ImageReader.newInstance(CAPTURE_WIDTH, CAPTURE_HEIGHT, ImageFormat.JPEG, 1)
 
                 imageReader.setOnImageAvailableListener({ reader ->
                     val image = reader.acquireLatestImage()
@@ -144,4 +152,9 @@ class CameraCapability(private val context: Context) : DeviceCapability {
                 }
             }
         }
+
+    companion object {
+        private const val CAPTURE_WIDTH = 1280
+        private const val CAPTURE_HEIGHT = 720
+    }
 }

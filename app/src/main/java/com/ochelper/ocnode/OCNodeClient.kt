@@ -165,7 +165,12 @@ class OCNodeClient(
             Log.d(TAG, "Handshake: got nonce, sending connect")
 
             val identity = identityStore.loadOrCreate()
-            val capabilities = capabilityManager.enabledCapabilities().map { it.id }
+            val enabledIds = capabilityManager.enabledCapabilities().map { it.id }
+            // Advertise the gateway's canonical capability/command vocabulary.
+            // Internal ids (e.g. camera.take_photo) are not recognized by the
+            // gateway allowlist and would be dropped, leaving the node un-invokable.
+            val caps = OCNodeCommandMap.caps(enabledIds)
+            val commands = OCNodeCommandMap.commands(enabledIds)
             val role = "node"
             val scopes = emptyList<String>()
             val clientId = "openclaw-android"
@@ -204,8 +209,8 @@ class OCNodeClient(
                     put("deviceFamily", deviceFamily)
                     put("modelIdentifier", "${Build.MANUFACTURER} ${Build.MODEL}")
                 })
-                put("caps", buildJsonArray { capabilities.forEach { add(JsonPrimitive(it)) } })
-                put("commands", buildJsonArray { capabilities.forEach { add(JsonPrimitive(it)) } })
+                put("caps", buildJsonArray { caps.forEach { add(JsonPrimitive(it)) } })
+                put("commands", buildJsonArray { commands.forEach { add(JsonPrimitive(it)) } })
                 put("role", role)
                 if (cfg.authToken.isNotEmpty()) {
                     put("auth", buildJsonObject {
@@ -248,7 +253,7 @@ class OCNodeClient(
 
             val sessionId = ack["payload"]?.jsonObject?.get("server")?.jsonObject?.get("connId")?.jsonPrimitive?.content ?: connectId
             _state.value = OCNodeState.Connected(cfg.serverUrl, sessionId)
-            Log.i(TAG, "Connected. sessionId=$sessionId caps=$capabilities")
+            Log.i(TAG, "Connected. sessionId=$sessionId caps=$caps commands=$commands")
 
         } catch (e: Exception) {
             Log.w(TAG, "Handshake failed: ${e.message}")
@@ -270,43 +275,78 @@ class OCNodeClient(
                 deferred.complete(frame)
             }
             "req" -> {
-                // Incoming invoke request from OpenClaw
-                val id = frame["id"]?.jsonPrimitive?.content ?: return
-                val method = frame["method"]?.jsonPrimitive?.content ?: return
-                scope.launch { handleInvoke(id, method, frame["params"]?.jsonObject ?: buildJsonObject {}) }
+                // Some gateways may deliver invokes as a request envelope instead
+                // of a node.invoke.request event. Translate to the same handler.
+                val method = frame["method"]?.jsonPrimitive?.content
+                if (method == "node.invoke.request") {
+                    val payload = frame["params"]?.jsonObject ?: frame["payload"]?.jsonObject
+                    if (payload != null) scope.launch { handleInvoke(payload) }
+                } else {
+                    Log.d(TAG, "Gateway request: $method")
+                }
             }
             "event" -> {
                 val event = frame["event"]?.jsonPrimitive?.content
-                if (event == "connect.challenge") {
-                    val payload = frame["payload"]?.jsonObject
-                    val nonce = payload?.get("nonce")?.jsonPrimitive?.content
-                    val serverTs = payload?.get("ts")?.jsonPrimitive?.content?.toLongOrNull()
-                    Log.d(TAG, "Received connect.challenge nonce=${nonce?.take(8)}... ts=$serverTs")
-                    if (!nonce.isNullOrBlank() && !connectNonceDeferred.isCompleted) {
-                        connectNonceDeferred.complete(ConnectChallenge(nonce, serverTs))
+                when (event) {
+                    "connect.challenge" -> {
+                        val payload = frame["payload"]?.jsonObject
+                        val nonce = payload?.get("nonce")?.jsonPrimitive?.content
+                        val serverTs = payload?.get("ts")?.jsonPrimitive?.content?.toLongOrNull()
+                        Log.d(TAG, "Received connect.challenge nonce=${nonce?.take(8)}... ts=$serverTs")
+                        if (!nonce.isNullOrBlank() && !connectNonceDeferred.isCompleted) {
+                            connectNonceDeferred.complete(ConnectChallenge(nonce, serverTs))
+                        }
                     }
-                } else {
-                    Log.d(TAG, "Gateway event: $event")
+                    "node.invoke.request" -> {
+                        val payload = frame["payload"]?.jsonObject
+                        if (payload != null) scope.launch { handleInvoke(payload) }
+                    }
+                    else -> Log.d(TAG, "Gateway event: $event")
                 }
             }
         }
     }
 
-    private suspend fun handleInvoke(id: String, command: String, params: JsonObject) {
+    private suspend fun handleInvoke(payload: JsonObject) {
         val ws = socket ?: return
-        Log.d(TAG, "invoke: $command params=$params")
-        val result = capabilityManager.execute(command, params)
-        val hasError = result["error"] != null
-        val responseFrame = buildJsonObject {
-            put("type", "res")
-            put("id", id)
-            put("ok", !hasError)
-            if (!hasError) put("result", result) else put("error", buildJsonObject {
-                put("code", "INVOKE_FAILED")
-                put("message", result["error"]?.jsonPrimitive?.content ?: "failed")
-            })
+        val invokeId = payload["id"]?.jsonPrimitive?.content ?: return
+        val nodeId = payload["nodeId"]?.jsonPrimitive?.content ?: return
+        val command = payload["command"]?.jsonPrimitive?.content ?: return
+        // Params arrive either as a nested object or a JSON-encoded string.
+        val params = payload["params"]?.jsonObject
+            ?: payload["paramsJSON"]?.jsonPrimitive?.content?.let {
+                try { json.parseToJsonElement(it).jsonObject } catch (_: Exception) { null }
+            } ?: buildJsonObject {}
+        // Translate the gateway's canonical command name (e.g. camera.snap) back
+        // to our internal capability id (e.g. camera.take_photo) before dispatch.
+        val capabilityId = OCNodeCommandMap.resolveCapabilityId(command)
+        Log.d(TAG, "invoke: $command -> $capabilityId params=$params")
+        val result = try {
+            capabilityManager.execute(capabilityId, params)
+        } catch (e: Exception) {
+            buildJsonObject { put("error", e.message ?: "execute failed") }
         }
-        sendFrame(ws, responseFrame)
+        val hasError = result["error"] != null
+        val resultParams = buildJsonObject {
+            put("id", invokeId)
+            put("nodeId", nodeId)
+            put("ok", !hasError)
+            if (!hasError) {
+                put("payloadJSON", result.toString())
+            } else {
+                put("error", buildJsonObject {
+                    put("code", "INVOKE_FAILED")
+                    put("message", result["error"]?.jsonPrimitive?.content ?: "failed")
+                })
+            }
+        }
+        val resultFrame = buildJsonObject {
+            put("type", "req")
+            put("id", UUID.randomUUID().toString())
+            put("method", "node.invoke.result")
+            put("params", resultParams)
+        }
+        sendFrame(ws, resultFrame)
     }
 
     private suspend fun sendFrame(ws: WebSocket, frame: JsonObject) {

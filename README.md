@@ -139,7 +139,99 @@ adb -s 10.239.152.121:5555 install -r app/build/outputs/apk/debug/app-debug.apk
 | `calendar.list` / `calendar.add` | 列出/添加日程 |
 | `apps.list` / `apps.launch` | 列出/启动应用 |
 
+#### 从 OpenClaw 侧调用 Node
+
+连接成功后，设备会作为一个 Node 出现在 Gateway 的设备列表中。**首次连接需要在 Gateway 侧批准配对**：
+
+```bash
+# 列出待批准 / 已配对设备，找到 OCHelper Android 的 requestId
+openclaw devices list
+
+# 批准配对请求
+openclaw devices approve <requestId>
+```
+
+批准后即可通过 `openclaw nodes` 命令族调用设备能力：
+
+```bash
+# 查看节点在线状态与能力
+openclaw nodes status
+openclaw nodes describe --node "OCHelper Android"
+
+# 通用调用：--command 为 Capability ID，--params 为 JSON 入参
+openclaw nodes invoke --node "OCHelper Android" --command device.info --params '{}'
+```
+
+**常用调用示例：**
+
+| 目的 | 命令 |
+|------|------|
+| 设备信息（电量/存储） | `--command device.info --params '{}'` |
+| 读取系统设置 | `--command system.settings --params '{"action":"get"}'` |
+| 设置亮度（0–255） | `--command system.settings --params '{"action":"set_brightness","value":200}'` |
+| 设置媒体音量 | `--command system.settings --params '{"action":"set_volume","stream":"music","level":7}'` |
+| 列出已安装应用 | `--command apps.list --params '{"action":"list"}'` |
+| 启动应用 | `--command apps.list --params '{"action":"launch","package":"com.android.settings"}'` |
+| 最近相册 | `--command gallery.list --params '{"type":"images","limit":20}'` |
+| 录音 5 秒 | `--command microphone.record --params '{"duration_sec":5}'` |
+| 截屏（base64 PNG） | `--command screen.screenshot --params '{}'` |
+| GPS 定位 | `--command location.get --params '{}'` |
+
+部分能力提供便捷子命令：
+
+```bash
+openclaw nodes camera   snap --node "OCHelper Android"   # 等价于 camera.take_photo
+openclaw nodes location      --node "OCHelper Android"   # 等价于 location.get
+openclaw nodes screen        --node "OCHelper Android"   # 等价于 screen.screenshot
+```
+
+也可由 Agent 以自然语言自动调用上述能力：
+
+```bash
+openclaw agent --message "查看手机电量并拍一张照片"
+```
+
+> **提示**：默认关闭的能力（联系人、日历、通知、短信）需先在 App 中开启；摄像头、麦克风、定位、截屏等需授予对应 Android 权限，否则调用会返回 `{"error":"... permission not granted"}`。
+
+#### 常见问题：WebUI 聊天里 Agent 说"无法访问 Android Node"
+
+在 OpenClaw WebUI（Control UI）里发送如"用 OCHelper Android Node 查看电量并拍照"的消息时，若 Agent 回复类似：
+
+> *I don't currently have access to an OCHelper Android Node or any Android device interaction tools. My available tools are limited to session status checks.*
+
+这**不是 Node 的问题**（Node 仍在线，持续收到 `tick`/`health` 事件），而是 **Agent 的工具档位（tool profile）限制**。
+
+OpenClaw 通过一个名为 `nodes` 的 Agent 工具把已配对节点暴露给模型。如果该 Agent 的工具档位是 `minimal`，`nodes` 工具会被过滤掉，模型便无法调用设备。
+
+**排查：** 查看 `~/.openclaw/openclaw.json` 中对应 Agent 的配置：
+
+```jsonc
+"agents": {
+  "list": [
+    {
+      "id": "main",
+      "tools": { "profile": "minimal" }   // ← 罪魁祸首
+    }
+  ]
+}
+```
+
+**修复（任选其一）：**
+
+```jsonc
+// 方案 A：使用更完整的档位
+"tools": { "profile": "full" }
+
+// 方案 B：保留 minimal，仅额外放行 nodes 工具
+"tools": { "profile": "minimal", "alsoAllow": ["nodes"] }
+```
+
+改完后重启/重载 Gateway 使 Agent 重新加载工具集，再次发送聊天即可。
+
+> 此外，Agent 运行所用的 operator 身份还需具备 `operator.read` / `operator.write` 权限范围。首次调用 `nodes` 时可能触发 scope 升级请求，需在 Control UI / dashboard 中用管理员 operator 批准一次。
+
 ---
+
 
 ### 模块二：Android MCP Server
 

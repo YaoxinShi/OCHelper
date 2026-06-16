@@ -20,7 +20,18 @@ class DeviceInfoCapability(private val context: Context) : DeviceCapability {
 
     override suspend fun execute(params: JsonObject): JsonObject {
         val bm = context.getSystemService(Context.BATTERY_SERVICE) as BatteryManager
-        val batteryLevel = bm.getIntProperty(BatteryManager.BATTERY_PROPERTY_CAPACITY)
+        var batteryLevel = bm.getIntProperty(BatteryManager.BATTERY_PROPERTY_CAPACITY)
+        // BATTERY_PROPERTY_CAPACITY is unsupported on some devices/emulators and
+        // returns Integer.MIN_VALUE. Fall back to the sticky battery broadcast.
+        if (batteryLevel == Int.MIN_VALUE || batteryLevel < 0 || batteryLevel > 100) {
+            val batteryIntent = context.registerReceiver(
+                null,
+                android.content.IntentFilter(android.content.Intent.ACTION_BATTERY_CHANGED)
+            )
+            val level = batteryIntent?.getIntExtra(BatteryManager.EXTRA_LEVEL, -1) ?: -1
+            val scale = batteryIntent?.getIntExtra(BatteryManager.EXTRA_SCALE, -1) ?: -1
+            batteryLevel = if (level >= 0 && scale > 0) (level * 100) / scale else -1
+        }
         val isCharging = bm.isCharging
 
         val statFs = StatFs(Environment.getDataDirectory().path)
