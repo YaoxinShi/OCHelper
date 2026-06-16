@@ -36,7 +36,7 @@ class OCNodeService : Service() {
         super.onCreate()
         prefs = AppPreferences(this)
         val capabilityManager = ServiceRegistry.getCapabilityManager(applicationContext)
-        nodeClient = OCNodeClient(capabilityManager)
+        nodeClient = OCNodeClient(capabilityManager, applicationContext)
         startForeground(OCHelperApp.NOTIFICATION_ID_OCNODE, buildNotification())
         ServiceRegistry.ocNodeClient = nodeClient
     }

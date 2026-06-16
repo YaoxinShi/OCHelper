@@ -38,6 +38,10 @@ android {
     packaging {
         resources {
             excludes += "/META-INF/{AL2.0,LGPL2.1}"
+            excludes += "org/bouncycastle/pqc/crypto/picnic/lowmcL1.bin.properties"
+            excludes += "org/bouncycastle/pqc/crypto/picnic/lowmcL3.bin.properties"
+            excludes += "org/bouncycastle/pqc/crypto/picnic/lowmcL5.bin.properties"
+            excludes += "org/bouncycastle/x509/CertPathReviewerMessages*.properties"
             excludes += "META-INF/services/java.net.spi.InetAddressResolverProvider"
             excludes += "META-INF/INDEX.LIST"
             excludes += "META-INF/io.netty.versions.properties"
@@ -82,6 +86,9 @@ dependencies {
 
     // Network
     implementation("com.squareup.okhttp3:okhttp:5.3.2")
+
+    // Crypto (Ed25519 device identity for OpenClaw gateway handshake)
+    implementation("org.bouncycastle:bcprov-jdk18on:1.83")
 
     // Ktor Server (MCP HTTP server embedded in app)
     implementation("io.ktor:ktor-server-core:3.1.3")

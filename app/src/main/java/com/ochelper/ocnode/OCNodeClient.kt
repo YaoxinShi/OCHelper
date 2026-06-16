@@ -1,5 +1,6 @@
 package com.ochelper.ocnode
 
+import android.content.Context
 import android.os.Build
 import android.util.Log
 import com.ochelper.capability.CapabilityManager
@@ -16,11 +17,13 @@ import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonArray
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.put
+import java.util.Locale
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.Response
@@ -51,12 +54,20 @@ data class OCNodeConfig(
 
 class OCNodeClient(
     private val capabilityManager: CapabilityManager,
+    context: Context,
 ) {
     private val TAG = "OCNodeClient"
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val json = Json { ignoreUnknownKeys = true; isLenient = true }
     private val writeLock = Mutex()
     private val pending = ConcurrentHashMap<String, CompletableDeferred<JsonObject>>()
+    private val identityStore = DeviceIdentityStore(context.applicationContext)
+
+    // Carries the gateway's connect.challenge nonce and server timestamp.
+    private data class ConnectChallenge(val nonce: String, val serverTs: Long?)
+
+    // Completed when the gateway sends its connect.challenge on a new connection.
+    @Volatile private var connectNonceDeferred = CompletableDeferred<ConnectChallenge>()
 
     private val _state = MutableStateFlow<OCNodeState>(OCNodeState.Disconnected)
     val state: StateFlow<OCNodeState> = _state.asStateFlow()
@@ -89,31 +100,43 @@ class OCNodeClient(
         while (currentCoroutineContext().isActive) {
             _state.value = OCNodeState.Connecting
             Log.d(TAG, "Connecting to ${cfg.serverUrl}")
+            connectNonceDeferred = CompletableDeferred()
+            var ws: WebSocket? = null
             try {
                 val closeDeferred = CompletableDeferred<Unit>()
-                val request = Request.Builder()
+                val requestBuilder = Request.Builder()
                     .url(cfg.serverUrl)
                     .header("User-Agent", buildUserAgent())
-                    .build()
+                val request = requestBuilder.build()
 
-                socket = client.newWebSocket(request, object : WebSocketListener() {
+                ws = client.newWebSocket(request, object : WebSocketListener() {
                     override fun onOpen(ws: WebSocket, response: Response) {
+                        Log.d(TAG, "WS onOpen (HTTP ${response.code})")
                         scope.launch { doHandshake(ws, cfg, closeDeferred) }
                     }
                     override fun onMessage(ws: WebSocket, text: String) {
                         scope.launch { handleMessage(text) }
                     }
+                    override fun onClosing(ws: WebSocket, code: Int, reason: String) {
+                        Log.w(TAG, "WS onClosing code=$code reason=$reason")
+                    }
                     override fun onFailure(ws: WebSocket, t: Throwable, response: Response?) {
-                        Log.w(TAG, "WebSocket failure: ${t.message}")
+                        Log.w(TAG, "WebSocket failure: ${t.message} (HTTP ${response?.code})")
                         closeDeferred.complete(Unit)
                     }
                     override fun onClosed(ws: WebSocket, code: Int, reason: String) {
+                        Log.w(TAG, "WS onClosed code=$code reason=$reason")
                         closeDeferred.complete(Unit)
                     }
                 })
+                socket = ws
                 closeDeferred.await()
             } catch (e: Exception) {
                 Log.w(TAG, "Connection error: ${e.message}")
+            } finally {
+                // Ensure this iteration's socket is closed (e.g. on cancellation)
+                // so it doesn't linger and flap until the ping timeout.
+                ws?.cancel()
             }
 
             socket = null
@@ -132,22 +155,73 @@ class OCNodeClient(
 
     private suspend fun doHandshake(ws: WebSocket, cfg: OCNodeConfig, closeDeferred: CompletableDeferred<Unit>) {
         try {
-            // Send connect request (OpenClaw Gateway protocol v3)
+            // OpenClaw Gateway protocol v4: the gateway sends a `connect.challenge`
+            // event with a nonce immediately after the socket opens. We must wait for
+            // that nonce, sign it with our Ed25519 device key, and include the signed
+            // `device` block in the connect request.
+            Log.d(TAG, "Handshake: waiting for connect.challenge nonce")
+            val challenge = withTimeout(10_000L) { connectNonceDeferred.await() }
+            val connectNonce = challenge.nonce
+            Log.d(TAG, "Handshake: got nonce, sending connect")
+
+            val identity = identityStore.loadOrCreate()
             val capabilities = capabilityManager.enabledCapabilities().map { it.id }
+            val role = "node"
+            val scopes = emptyList<String>()
+            val clientId = "openclaw-android"
+            val clientMode = "node"
+            val platform = "android"
+            val deviceFamily = "Android"
+            // Use the server-provided timestamp from the challenge so a skewed
+            // device clock cannot push signedAt outside the gateway freshness window.
+            val signedAtMs = challenge.serverTs ?: System.currentTimeMillis()
+
+            val signaturePayload = DeviceAuthPayload.buildV3(
+                deviceId = identity.deviceId,
+                clientId = clientId,
+                clientMode = clientMode,
+                role = role,
+                scopes = scopes,
+                signedAtMs = signedAtMs,
+                token = cfg.authToken.takeIf { it.isNotEmpty() },
+                nonce = connectNonce,
+                platform = platform,
+                deviceFamily = deviceFamily,
+            )
+            val signature = identityStore.signPayload(signaturePayload, identity)
+            val publicKey = identityStore.publicKeyBase64Url(identity)
+
             val connectParams = buildJsonObject {
-                put("role", "node")
-                put("token", cfg.authToken)
-                put("caps", buildJsonArray { capabilities.forEach { add(kotlinx.serialization.json.JsonPrimitive(it)) } })
-                put("commands", buildJsonArray { capabilities.forEach { add(kotlinx.serialization.json.JsonPrimitive(it)) } })
+                put("minProtocol", 3)
+                put("maxProtocol", 4)
                 put("client", buildJsonObject {
-                    put("id", cfg.nodeId)
+                    put("id", clientId)
                     put("displayName", "OCHelper Android")
                     put("version", "1.0.0")
-                    put("platform", "android")
-                    put("mode", "node")
-                    put("deviceFamily", "Android")
+                    put("platform", platform)
+                    put("mode", clientMode)
+                    put("instanceId", cfg.nodeId)
+                    put("deviceFamily", deviceFamily)
                     put("modelIdentifier", "${Build.MANUFACTURER} ${Build.MODEL}")
                 })
+                put("caps", buildJsonArray { capabilities.forEach { add(JsonPrimitive(it)) } })
+                put("commands", buildJsonArray { capabilities.forEach { add(JsonPrimitive(it)) } })
+                put("role", role)
+                if (cfg.authToken.isNotEmpty()) {
+                    put("auth", buildJsonObject {
+                        put("token", cfg.authToken)
+                    })
+                }
+                if (!signature.isNullOrBlank() && !publicKey.isNullOrBlank()) {
+                    put("device", buildJsonObject {
+                        put("id", identity.deviceId)
+                        put("publicKey", publicKey)
+                        put("signature", signature)
+                        put("signedAt", signedAtMs)
+                        put("nonce", connectNonce)
+                    })
+                }
+                put("locale", Locale.getDefault().toLanguageTag())
                 put("userAgent", buildUserAgent())
             }
             val connectId = UUID.randomUUID().toString()
@@ -172,7 +246,7 @@ class OCNodeClient(
                 return
             }
 
-            val sessionId = ack["result"]?.jsonObject?.get("sessionId")?.jsonPrimitive?.content ?: connectId
+            val sessionId = ack["payload"]?.jsonObject?.get("server")?.jsonObject?.get("connId")?.jsonPrimitive?.content ?: connectId
             _state.value = OCNodeState.Connected(cfg.serverUrl, sessionId)
             Log.i(TAG, "Connected. sessionId=$sessionId caps=$capabilities")
 
@@ -203,7 +277,17 @@ class OCNodeClient(
             }
             "event" -> {
                 val event = frame["event"]?.jsonPrimitive?.content
-                Log.d(TAG, "Gateway event: $event")
+                if (event == "connect.challenge") {
+                    val payload = frame["payload"]?.jsonObject
+                    val nonce = payload?.get("nonce")?.jsonPrimitive?.content
+                    val serverTs = payload?.get("ts")?.jsonPrimitive?.content?.toLongOrNull()
+                    Log.d(TAG, "Received connect.challenge nonce=${nonce?.take(8)}... ts=$serverTs")
+                    if (!nonce.isNullOrBlank() && !connectNonceDeferred.isCompleted) {
+                        connectNonceDeferred.complete(ConnectChallenge(nonce, serverTs))
+                    }
+                } else {
+                    Log.d(TAG, "Gateway event: $event")
+                }
             }
         }
     }
