@@ -25,6 +25,7 @@ class RTSPService : Service() {
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private var rtspServer: RTSPServer? = null
+    private var previewSurface: android.view.Surface? = null
 
     private val _isStreaming = MutableStateFlow(false)
     val isStreaming: StateFlow<Boolean> = _isStreaming.asStateFlow()
@@ -51,6 +52,7 @@ class RTSPService : Service() {
         _config.value = cfg
         rtspServer?.stop()
         rtspServer = RTSPServer(applicationContext, cfg)
+        rtspServer!!.setPreviewSurface(previewSurface)
         rtspServer!!.start()
         _isStreaming.value = true
     }
@@ -59,6 +61,12 @@ class RTSPService : Service() {
         rtspServer?.stop()
         rtspServer = null
         _isStreaming.value = false
+    }
+
+    /** Attach or detach an on-screen camera preview surface. */
+    fun setPreviewSurface(surface: android.view.Surface?) {
+        previewSurface = surface
+        rtspServer?.setPreviewSurface(surface)
     }
 
     override fun onDestroy() {

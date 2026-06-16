@@ -3,9 +3,14 @@ package com.ochelper.ui.streaming
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
+import android.graphics.SurfaceTexture
+import android.view.Surface
+import android.view.TextureView
 import android.widget.Toast
+import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ContentCopy
@@ -14,9 +19,13 @@ import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.viewinterop.AndroidView
 import androidx.lifecycle.viewmodel.compose.viewModel
+import com.ochelper.service.ServiceRegistry
 import com.ochelper.util.NetworkUtils
 
 @Composable
@@ -44,11 +53,27 @@ fun StreamingScreen() {
     var selectedFps by remember(fps) { mutableStateOf(fps) }
     var bitrateText by remember(bitrate) { mutableStateOf((bitrate / 1000).toString()) }
 
+    // Preview surface is hoisted so it can be re-attached to the service once it exists
+    // (the surface usually becomes available before streaming starts).
+    var previewSurface by remember { mutableStateOf<Surface?>(null) }
+    LaunchedEffect(previewSurface, isStreaming) {
+        ServiceRegistry.rtspService?.setPreviewSurface(previewSurface)
+    }
+
     Column(
         modifier = Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(16.dp),
         verticalArrangement = Arrangement.spacedBy(16.dp)
     ) {
         Text("RTSP 视频流", style = MaterialTheme.typography.titleLarge)
+
+        // Camera preview
+        CameraPreview(
+            onSurfaceChanged = { previewSurface = it },
+            modifier = Modifier
+                .fillMaxWidth(0.5f)
+                .aspectRatio(16f / 9f)
+                .clip(RoundedCornerShape(12.dp))
+        )
 
         // Status + RTSP URL
         ElevatedCard {
@@ -120,5 +145,42 @@ fun StreamingScreen() {
                 ) { Text("保存配置") }
             }
         }
+    }
+}
+
+/**
+ * Rectangular camera preview area. Provides its [Surface] to the running RTSP service so
+ * the camera capture session can mirror the streamed frames on screen.
+ */
+@Composable
+private fun CameraPreview(
+    onSurfaceChanged: (Surface?) -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    Box(
+        modifier = modifier.background(Color.Black),
+    ) {
+        AndroidView(
+            factory = { ctx ->
+                TextureView(ctx).apply {
+                    surfaceTextureListener = object : TextureView.SurfaceTextureListener {
+                        override fun onSurfaceTextureAvailable(st: SurfaceTexture, width: Int, height: Int) {
+                            st.setDefaultBufferSize(1280, 720)
+                            onSurfaceChanged(Surface(st))
+                        }
+
+                        override fun onSurfaceTextureSizeChanged(st: SurfaceTexture, width: Int, height: Int) {}
+
+                        override fun onSurfaceTextureDestroyed(st: SurfaceTexture): Boolean {
+                            onSurfaceChanged(null)
+                            return true
+                        }
+
+                        override fun onSurfaceTextureUpdated(st: SurfaceTexture) {}
+                    }
+                }
+            },
+            modifier = Modifier.fillMaxSize(),
+        )
     }
 }

@@ -52,6 +52,7 @@ class RTSPServer(
     private var captureSession: android.hardware.camera2.CameraCaptureSession? = null
     private var encoder: MediaCodec? = null
     private var encoderInputSurface: Surface? = null
+    @Volatile private var previewSurface: Surface? = null
     private val running = AtomicBoolean(false)
 
     // SPS/PPS parameter sets (extracted from encoder output)
@@ -83,6 +84,7 @@ class RTSPServer(
         encoder = null
         encoderInputSurface?.release()
         encoderInputSurface = null
+        previewSurface = null
         cameraThread.quitSafely()
         rtpSocket?.close()
         rtpSocket = null
@@ -262,7 +264,7 @@ class RTSPServer(
     }
 
     private fun openCamera() {
-        val surface = encoderInputSurface ?: return
+        if (encoderInputSurface == null) return
         val cameraManager = context.getSystemService(Context.CAMERA_SERVICE) as CameraManager
         val cameraId = cameraManager.cameraIdList.firstOrNull { id ->
             val facing = cameraManager.getCameraCharacteristics(id)
@@ -275,20 +277,7 @@ class RTSPServer(
             cameraManager.openCamera(cameraId, object : android.hardware.camera2.CameraDevice.StateCallback() {
                 override fun onOpened(camera: android.hardware.camera2.CameraDevice) {
                     cameraDevice = camera
-                    camera.createCaptureSession(listOf(surface), object :
-                        android.hardware.camera2.CameraCaptureSession.StateCallback() {
-                        override fun onConfigured(session: android.hardware.camera2.CameraCaptureSession) {
-                            captureSession = session
-                            val req = camera.createCaptureRequest(android.hardware.camera2.CameraDevice.TEMPLATE_RECORD).apply {
-                                addTarget(surface)
-                            }.build()
-                            session.setRepeatingRequest(req, null, cameraHandler)
-                            Log.i(TAG, "Camera streaming started")
-                        }
-                        override fun onConfigureFailed(session: android.hardware.camera2.CameraCaptureSession) {
-                            Log.e(TAG, "Camera session configure failed")
-                        }
-                    }, cameraHandler)
+                    startCaptureSession()
                 }
                 override fun onDisconnected(camera: android.hardware.camera2.CameraDevice) { camera.close() }
                 override fun onError(camera: android.hardware.camera2.CameraDevice, error: Int) {
@@ -298,6 +287,51 @@ class RTSPServer(
             }, cameraHandler)
         } catch (e: SecurityException) {
             Log.e(TAG, "Camera permission denied")
+        }
+    }
+
+    /**
+     * (Re)create the camera capture session targeting the encoder input surface and,
+     * when available, the on-screen preview surface.
+     */
+    private fun startCaptureSession() {
+        val camera = cameraDevice ?: return
+        val encSurface = encoderInputSurface ?: return
+        val preview = previewSurface
+        val targets = if (preview != null) listOf(encSurface, preview) else listOf(encSurface)
+        try {
+            captureSession?.close()
+        } catch (_: Exception) {}
+        captureSession = null
+        try {
+            camera.createCaptureSession(targets, object :
+                android.hardware.camera2.CameraCaptureSession.StateCallback() {
+                override fun onConfigured(session: android.hardware.camera2.CameraCaptureSession) {
+                    captureSession = session
+                    val req = camera.createCaptureRequest(android.hardware.camera2.CameraDevice.TEMPLATE_RECORD).apply {
+                        addTarget(encSurface)
+                        preview?.let { addTarget(it) }
+                    }.build()
+                    session.setRepeatingRequest(req, null, cameraHandler)
+                    Log.i(TAG, "Camera streaming started (preview=${preview != null})")
+                }
+                override fun onConfigureFailed(session: android.hardware.camera2.CameraCaptureSession) {
+                    Log.e(TAG, "Camera session configure failed")
+                }
+            }, cameraHandler)
+        } catch (e: Exception) {
+            Log.e(TAG, "createCaptureSession failed: ${e.message}")
+        }
+    }
+
+    /**
+     * Attach or detach an on-screen preview [Surface]. Safe to call before or during streaming;
+     * the capture session is rebuilt when the camera is already open.
+     */
+    fun setPreviewSurface(surface: Surface?) {
+        previewSurface = surface
+        if (running.get() && cameraDevice != null) {
+            cameraHandler.post { startCaptureSession() }
         }
     }
 
