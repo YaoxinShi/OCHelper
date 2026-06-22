@@ -140,12 +140,7 @@ class MCPServer(
                     put("jsonrpc", "2.0")
                     put("id", id ?: JsonNull)
                     put("result", buildJsonObject {
-                        put("content", buildJsonArray {
-                            add(buildJsonObject {
-                                put("type", "text")
-                                put("text", result.toString())
-                            })
-                        })
+                        put("content", buildToolContent(result))
                         put("isError", result["error"] != null)
                     })
                 }
@@ -170,4 +165,42 @@ class MCPServer(
                 put("message", message)
             })
         }
+
+    /**
+     * Build the MCP `content` array for a tool result. When a capability returns a base64 image
+     * (e.g. camera.take_photo / screen.screenshot), emit a proper MCP `image` content block
+     * (`type:"image"`, `data`, `mimeType`) instead of burying the base64 in a `text` blob, which
+     * MCP clients/LLMs cannot interpret as an image. A compact metadata text block (without the
+     * bulky base64 payload) is appended for context.
+     */
+    private fun buildToolContent(result: JsonObject): JsonArray {
+        val imageB64 = (result["base64"] ?: result["image_base64"])
+            ?.jsonPrimitive?.contentOrNull
+        val mime = result["mime_type"]?.jsonPrimitive?.contentOrNull
+        if (imageB64 != null && (mime == null || mime.startsWith("image/"))) {
+            val mimeType = mime ?: "image/jpeg"
+            val meta = buildJsonObject {
+                result.forEach { (k, v) ->
+                    if (k != "base64" && k != "image_base64") put(k, v)
+                }
+            }
+            return buildJsonArray {
+                add(buildJsonObject {
+                    put("type", "image")
+                    put("data", imageB64)
+                    put("mimeType", mimeType)
+                })
+                add(buildJsonObject {
+                    put("type", "text")
+                    put("text", meta.toString())
+                })
+            }
+        }
+        return buildJsonArray {
+            add(buildJsonObject {
+                put("type", "text")
+                put("text", result.toString())
+            })
+        }
+    }
 }
